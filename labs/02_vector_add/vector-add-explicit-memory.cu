@@ -1,5 +1,4 @@
-// Lab 02: Vector Addition
-// Read README.md, then implement the lab from scratch in this file.
+// Lab 02: Vector Addition with explicit CUDA device memory
 
 #include <cuda_runtime.h>
 
@@ -49,10 +48,9 @@ void initialize_inputs(std::vector<float> &h_a, std::vector<float> &h_b,
     }
 }
 
-float benchmark_scalar_kernel(const std::vector<float> &h_a, const std::vector<float> &h_b,
-                              std::vector<float> &h_output, int problem_size, int threads_per_block,
-                              int warmup_iterations, int repetitions, cudaEvent_t start,
-                              cudaEvent_t stop)
+float benchmark_scalar_kernel(const float *d_a, const float *d_b, float *d_output, int problem_size,
+                              int threads_per_block, int warmup_iterations, int repetitions,
+                              cudaEvent_t start, cudaEvent_t stop)
 {
     int blocks_per_grid = (problem_size + threads_per_block - 1) / threads_per_block;
 
@@ -61,7 +59,7 @@ float benchmark_scalar_kernel(const std::vector<float> &h_a, const std::vector<f
 
     for (int iteration = 0; iteration < warmup_iterations; ++iteration)
     {
-        vector_add<<<grid, block>>>(h_a.data(), h_b.data(), h_output.data(), problem_size);
+        vector_add<<<grid, block>>>(d_a, d_b, d_output, problem_size);
     }
 
     CHECK_CUDA(cudaGetLastError());
@@ -71,7 +69,7 @@ float benchmark_scalar_kernel(const std::vector<float> &h_a, const std::vector<f
 
     for (int iteration = 0; iteration < repetitions; ++iteration)
     {
-        vector_add<<<grid, block>>>(h_a.data(), h_b.data(), h_output.data(), problem_size);
+        vector_add<<<grid, block>>>(d_a, d_b, d_output, problem_size);
     }
 
     CUDA_CHECK(cudaEventRecord(stop, 0));
@@ -84,9 +82,8 @@ float benchmark_scalar_kernel(const std::vector<float> &h_a, const std::vector<f
     return total_milliseconds / static_cast<float>(repetitions);
 }
 
-float benchmark_grid_stride_kernel(const std::vector<float> &h_a, const std::vector<float> &h_b,
-                                   std::vector<float> &h_output, int problem_size,
-                                   int threads_per_block, int blocks_per_grid,
+float benchmark_grid_stride_kernel(const float *d_a, const float *d_b, float *d_output,
+                                   int problem_size, int threads_per_block, int blocks_per_grid,
                                    int warmup_iterations, int repetitions, cudaEvent_t start,
                                    cudaEvent_t stop)
 {
@@ -95,8 +92,7 @@ float benchmark_grid_stride_kernel(const std::vector<float> &h_a, const std::vec
 
     for (int iteration = 0; iteration < warmup_iterations; ++iteration)
     {
-        vector_add_stride_step<<<grid, block>>>(h_a.data(), h_b.data(), h_output.data(),
-                                                problem_size);
+        vector_add_stride_step<<<grid, block>>>(d_a, d_b, d_output, problem_size);
     }
 
     CHECK_CUDA(cudaGetLastError());
@@ -106,8 +102,7 @@ float benchmark_grid_stride_kernel(const std::vector<float> &h_a, const std::vec
 
     for (int iteration = 0; iteration < repetitions; ++iteration)
     {
-        vector_add_stride_step<<<grid, block>>>(h_a.data(), h_b.data(), h_output.data(),
-                                                problem_size);
+        vector_add_stride_step<<<grid, block>>>(d_a, d_b, d_output, problem_size);
     }
 
     CUDA_CHECK(cudaEventRecord(stop, 0));
@@ -116,6 +111,32 @@ float benchmark_grid_stride_kernel(const std::vector<float> &h_a, const std::vec
 
     float total_milliseconds = 0.0F;
     CUDA_CHECK(cudaEventElapsedTime(&total_milliseconds, start, stop));
+
+    return total_milliseconds / static_cast<float>(repetitions);
+}
+
+float benchmark_device_copy(const float *d_source, float *d_destination, std::size_t bytes,
+                            int warmup_iterations, int repetitions, cudaEvent_t start,
+                            cudaEvent_t stop)
+{
+    for (int iteration = 0; iteration < warmup_iterations; ++iteration)
+    {
+        CHECK_CUDA(cudaMemcpyAsync(d_destination, d_source, bytes, cudaMemcpyDeviceToDevice));
+    }
+
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaEventRecord(start, 0));
+
+    for (int iteration = 0; iteration < repetitions; ++iteration)
+    {
+        CHECK_CUDA(cudaMemcpyAsync(d_destination, d_source, bytes, cudaMemcpyDeviceToDevice));
+    }
+
+    CHECK_CUDA(cudaEventRecord(stop, 0));
+    CHECK_CUDA(cudaEventSynchronize(stop));
+
+    float total_milliseconds = 0.0F;
+    CHECK_CUDA(cudaEventElapsedTime(&total_milliseconds, start, stop));
 
     return total_milliseconds / static_cast<float>(repetitions);
 }
@@ -149,6 +170,7 @@ int main()
     int warmup_iterations = 10;
     int repetitions = 100;
 
+    // 1. Create CUDA Events
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));
@@ -162,48 +184,86 @@ int main()
     // Grid-stride loops let these blocks process the entire vector.
     int grid_stride_blocks = device_properties.multiProcessorCount * 4;
 
+    // host part
     std::vector<float> h_a(problem_size);
     std::vector<float> h_b(problem_size);
     std::vector<float> h_reference(problem_size);
-    std::vector<float> h_output_checkpoint1(problem_size, -1.0F);
-    std::vector<float> h_output_checkpoint2(problem_size, -1.0F);
-
-    double useful_bytes = 3.0 * static_cast<double>(problem_size) * sizeof(float);
+    std::vector<float> h_scalar_output(problem_size, -1.0F);
+    std::vector<float> h_grid_stride_output(problem_size, -1.0F);
+    std::vector<float> h_copy_output(problem_size, -1.0F);
 
     initialize_inputs(h_a, h_b, h_reference, problem_size);
 
+    std::size_t bytes = static_cast<std::size_t>(problem_size) * sizeof(float);
+
+    float *d_a = nullptr;
+    float *d_b = nullptr;
+    float *d_scalar_output = nullptr;
+    float *d_grid_stride_output = nullptr;
+    float *d_copy_output = nullptr;
+
+    CHECK_CUDA(cudaMalloc(&d_a, bytes));
+    CHECK_CUDA(cudaMalloc(&d_b, bytes));
+    CHECK_CUDA(cudaMalloc(&d_scalar_output, bytes));
+    CHECK_CUDA(cudaMalloc(&d_grid_stride_output, bytes));
+    CHECK_CUDA(cudaMalloc(&d_copy_output, bytes));
+
+    CHECK_CUDA(cudaMemcpy(d_a, h_a.data(), bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_b, h_b.data(), bytes, cudaMemcpyHostToDevice));
+
+    double useful_bytes_processed = 3.0 * static_cast<double>(problem_size) * sizeof(float);
+    double useful_bytes_copied = 2.0 * static_cast<double>(problem_size) * sizeof(float);
+
+    bool validation_passed = true;
     const int block_sizes[] = {128, 256};
     for (int threads_per_block : block_sizes)
     {
         float scalar_milliseconds =
-            benchmark_scalar_kernel(h_a, h_b, h_output_checkpoint1, problem_size, threads_per_block,
+            benchmark_scalar_kernel(d_a, d_b, d_scalar_output, problem_size, threads_per_block,
                                     warmup_iterations, repetitions, start, stop);
 
         float grid_stride_milliseconds = benchmark_grid_stride_kernel(
-            h_a, h_b, h_output_checkpoint2, problem_size, threads_per_block, grid_stride_blocks,
+            d_a, d_b, d_grid_stride_output, problem_size, threads_per_block, grid_stride_blocks,
             warmup_iterations, repetitions, start, stop);
 
-        double scalar_bandwidth = calculate_effective_bandwidth(useful_bytes, scalar_milliseconds);
+        double scalar_bandwidth =
+            calculate_effective_bandwidth(useful_bytes_processed, scalar_milliseconds);
         double grid_stride_bandwidth =
-            calculate_effective_bandwidth(useful_bytes, grid_stride_milliseconds);
+            calculate_effective_bandwidth(useful_bytes_processed, grid_stride_milliseconds);
 
         PRINT("block size: {}", threads_per_block);
         PRINT("scalar: {} ms, {} GB/s", scalar_milliseconds, scalar_bandwidth);
         PRINT("grid-stride: {} ms, {} GB/s", grid_stride_milliseconds, grid_stride_bandwidth);
 
-        if (!validate_output(h_output_checkpoint1, h_reference, problem_size))
-        {
-            return EXIT_FAILURE;
-        }
+        CHECK_CUDA(
+            cudaMemcpy(h_scalar_output.data(), d_scalar_output, bytes, cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_grid_stride_output.data(), d_grid_stride_output, bytes,
+                              cudaMemcpyDeviceToHost));
 
-        if (!validate_output(h_output_checkpoint2, h_reference, problem_size))
-        {
-            return EXIT_FAILURE;
-        }
+        bool scalar_valid = validate_output(h_scalar_output, h_reference, problem_size);
+        bool grid_stride_valid = validate_output(h_grid_stride_output, h_reference, problem_size);
+        validation_passed = validation_passed && scalar_valid && grid_stride_valid;
     }
+
+    float copy_milliseconds = benchmark_device_copy(d_a, d_copy_output, bytes, warmup_iterations,
+                                                    repetitions, start, stop);
+    double copy_bandwidth = calculate_effective_bandwidth(useful_bytes_copied, copy_milliseconds);
+
+    PRINT("D2D copy: {} ms, {} GB/s", copy_milliseconds, copy_bandwidth);
+
+    CHECK_CUDA(cudaMemcpy(h_copy_output.data(), d_copy_output, bytes, cudaMemcpyDeviceToHost));
+
+    bool copy_valid = validate_output(h_copy_output, h_a, problem_size);
+    validation_passed = validation_passed && copy_valid;
+
+    CHECK_CUDA(cudaFree(d_a));
+    CHECK_CUDA(cudaFree(d_b));
+    CHECK_CUDA(cudaFree(d_scalar_output));
+    CHECK_CUDA(cudaFree(d_grid_stride_output));
+    CHECK_CUDA(cudaFree(d_copy_output));
 
     CHECK_CUDA(cudaEventDestroy(start));
     CHECK_CUDA(cudaEventDestroy(stop));
 
-    return EXIT_SUCCESS;
+    return validation_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
