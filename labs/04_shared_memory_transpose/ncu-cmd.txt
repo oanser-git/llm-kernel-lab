@@ -1,0 +1,44 @@
+sudo /usr/local/cuda/bin/ncu \
+  --section LaunchStats \
+  --section Occupancy \
+  --section MemoryWorkloadAnalysis \
+  --section WarpStateStats \
+  --section SourceCounters \
+  --kernel-name regex:^naive_transpose_kernel \
+  --launch-count 1 \
+  --force-overwrite \
+  --export ./lab04-ncu/naive \
+  ./shared-memory-transpose \
+  4096 4096 0 1
+
+
+  sudo /usr/local/cuda/bin/ncu \
+  --section LaunchStats \
+  --section Occupancy \
+  --section MemoryWorkloadAnalysis \
+  --section WarpStateStats \
+  --section SourceCounters \
+  --kernel-name regex:^tiled_transpose_kernel \
+  --launch-count 1 \
+  --force-overwrite \
+  --export ./lab04-ncu/tiled \
+  ./shared-memory-transpose \
+  4096 4096 0 1
+
+  sudo /usr/local/cuda/bin/ncu \
+  --section LaunchStats \
+  --section Occupancy \
+  --section MemoryWorkloadAnalysis \
+  --section WarpStateStats \
+  --section SourceCounters \
+  --kernel-name regex:^padded_tiled_transpose_kernel \
+  --launch-count 1 \
+  --force-overwrite \
+  --export ./lab04-ncu/padded \
+  ./shared-memory-transpose \
+  4096 4096 0 1
+
+  /usr/local/cuda/bin/ncu \
+  --import ./lab04-ncu/naive.ncu-rep \
+  --page details \
+  --print-details all

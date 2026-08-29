@@ -170,7 +170,6 @@ int main()
     int warmup_iterations = 10;
     int repetitions = 100;
 
-    // 1. Create CUDA Events
     cudaEvent_t start, stop;
     CUDA_CHECK(cudaEventCreate(&start));
     CUDA_CHECK(cudaEventCreate(&stop));

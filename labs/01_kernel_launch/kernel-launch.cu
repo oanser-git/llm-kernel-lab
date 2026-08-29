@@ -16,7 +16,8 @@ void check_cuda(cudaError_t result, const char *function, const char *file, int 
     if (result != cudaSuccess)
     {
         std::cerr << "CUDA error at " << file << ':' << line << " while calling " << function
-                  << ": " << cudaGetErrorName(result) << " (" << cudaGetErrorString(result) << ")\n";
+                  << ": " << cudaGetErrorName(result) << " (" << cudaGetErrorString(result)
+                  << ")\n";
         std::exit(EXIT_FAILURE);
     }
 }
